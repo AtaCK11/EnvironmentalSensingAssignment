@@ -1,0 +1,106 @@
+
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+
+// Tags for esp logging
+static const char *TAGM = "MAIN";
+static const char *TAGP = "PRODUCER";
+static const char *TAGC = "CONSUMER";
+
+SemaphoreHandle_t DataAvailableSemaphore;
+SemaphoreHandle_t AtLeastOneEmptySemaphore;
+QueueHandle_t xQueue;
+
+int ReadSensor() {
+    // Simulate reading a sensor value
+    return (rand() % 1000) + 1; // Random value between 1 and 1000
+}
+
+// Producer task
+void ProducerThread(void *params) {
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(100)); // Simulate some dealy
+        
+        int data = ReadSensor();
+
+        // check if the queue is full
+        if (xSemaphoreTake(AtLeastOneEmptySemaphore, portMAX_DELAY) == pdTRUE) {
+            // add to queue
+            xQueueSend(xQueue, &data, portMAX_DELAY);
+
+            ESP_LOGI(TAGP, "Data sent: %d", data);
+            xSemaphoreGive(DataAvailableSemaphore);
+        }
+        // never reaches this point because
+        // the queue will be filled with the confirmation of the consumer consuming the data
+        else {
+            ESP_LOGI(TAGP, "Queue is full, waiting for consumer to consume data");
+            // drop oldest data and add new data
+            
+            int oldData = -1;
+            xQueueReceive(xQueue, &oldData, 0); // remove the oldest data from the queue
+            xQueueSend(xQueue, &data, portMAX_DELAY);
+
+        }
+    }
+}
+
+// Consumer task
+void ConsumerThread(void *params) {
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Consumer cant reach producer speed
+
+        if (xSemaphoreTake(DataAvailableSemaphore, portMAX_DELAY) == pdTRUE) {
+            // read from queue
+            int data = -1;
+            xQueueReceive(xQueue, &data, portMAX_DELAY);
+
+            // filter & process the data
+            if (data < 0) {
+                ESP_LOGI(TAGC, "Data is negative, ignoring");
+                continue;
+            }
+
+            ESP_LOGI(TAGC, "Data received: %d", data);
+            xSemaphoreGive(AtLeastOneEmptySemaphore);
+        }
+    }
+}
+
+
+void app_main(void) {
+    
+    // Initialize the xqueue
+    xQueue = xQueueCreate(10, sizeof(int));
+    if (xQueue == NULL) {
+        ESP_LOGE(TAGM, "Failed to create queue");
+        return;
+    }
+
+    // Initialize the semaphores
+    DataAvailableSemaphore = xSemaphoreCreateBinary();
+    if (DataAvailableSemaphore == NULL) {
+        ESP_LOGE(TAGM, "Failed to create DataAvailableSemaphore");
+        return;
+    }
+    AtLeastOneEmptySemaphore = xSemaphoreCreateBinary();
+    if (AtLeastOneEmptySemaphore == NULL) {
+        ESP_LOGE(TAGM, "Failed to create AtLeastOneEmptySemaphore");
+        return;
+    }
+
+    // Give the AtLeastOneEmptySemaphore to start the producer
+    xSemaphoreGive(AtLeastOneEmptySemaphore);
+
+    ESP_LOGI(TAGM, "MASTER INITALIZED");
+
+    xTaskCreate(ProducerThread, "ProducerThread", 2048, NULL, 1, NULL);
+    xTaskCreate(ConsumerThread, "ConsumerThread", 2048, NULL, 1, NULL);
+
+    ESP_LOGI(TAGM, "TASKS INITALIZED");
+    
+
+}
+
